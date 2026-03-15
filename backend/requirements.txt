@@ -1,0 +1,23 @@
+# ── Web framework ─────────────────────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.1
+python-dotenv==1.0.1
+
+# ── LangChain core + HuggingFace integration ──────────────────────────────────
+langchain==0.2.6
+langchain-core==0.2.10
+langchain-huggingface==0.0.3
+langchain-chroma==0.1.2
+
+# ── HuggingFace libraries ──────────────────────────────────────────────────────
+huggingface-hub==0.23.4
+sentence-transformers==3.0.0   # for all-MiniLM-L6-v2 local embeddings
+transformers==4.42.3
+torch==2.3.1                   # CPU-only; remove for GPU builds
+
+# ── Vector DB ─────────────────────────────────────────────────────────────────
+chromadb==0.5.3
+
+# ── YouTube transcript ─────────────────────────────────────────────────────────
+youtube-transcript-api==0.6.2
