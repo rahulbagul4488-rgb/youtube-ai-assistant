@@ -1,18 +1,15 @@
 """
 YouTube AI Assistant — FastAPI Backend
-RAG: Nomic Embeddings + ChromaDB + Supadata + Groq
-100% Free Stack
+Fast startup version — Nomic + ChromaDB + Supadata + Groq
 """
 
 import os
 import logging
 import httpx
-from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 import chromadb
@@ -38,46 +35,17 @@ CHUNK_SIZE       = int(os.getenv("CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP    = int(os.getenv("CHUNK_OVERLAP", "200"))
 TOP_K            = int(os.getenv("TOP_K", "4"))
 
-chroma_client = None
-llm           = None
+# Initialize at module level — fast startup
+nomic.login(NOMIC_API_KEY)
+chroma_client = chromadb.PersistentClient(path=CHROMA_PERSIST)
+llm = ChatGroq(
+    api_key=GROQ_API_KEY,
+    model_name=LLM_MODEL,
+    temperature=0.1,
+    max_tokens=512,
+)
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global chroma_client, llm
-
-    if not GROQ_API_KEY:
-        raise RuntimeError("GROQ_API_KEY is not set.")
-    if not NOMIC_API_KEY:
-        raise RuntimeError("NOMIC_API_KEY is not set.")
-    if not SUPADATA_API_KEY:
-        raise RuntimeError("SUPADATA_API_KEY is not set.")
-
-    # Nomic login
-    logger.info("Logging into Nomic …")
-    nomic.login(NOMIC_API_KEY)
-    logger.info("Nomic ready ✅")
-
-    # ChromaDB
-    logger.info("Setting up ChromaDB …")
-    chroma_client = chromadb.PersistentClient(path=CHROMA_PERSIST)
-    logger.info("ChromaDB ready ✅")
-
-    # Groq LLM
-    logger.info("Connecting to Groq — model '%s' …", LLM_MODEL)
-    llm = ChatGroq(
-        api_key=GROQ_API_KEY,
-        model_name=LLM_MODEL,
-        temperature=0.1,
-        max_tokens=512,
-    )
-    logger.info("LLM ready ✅")
-
-    yield
-    logger.info("Shutting down …")
-
-
-app = FastAPI(title="YouTube AI Assistant", version="4.0.0", lifespan=lifespan)
+app = FastAPI(title="YouTube AI Assistant", version="4.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -116,7 +84,6 @@ def _collection_exists(video_id: str) -> bool:
 
 
 def _get_embeddings(texts: list) -> list:
-    """Get embeddings using Nomic API."""
     output = embed.text(
         texts=texts,
         model="nomic-embed-text-v1.5",
@@ -126,7 +93,6 @@ def _get_embeddings(texts: list) -> list:
 
 
 def _get_query_embedding(query: str) -> list:
-    """Get query embedding using Nomic API."""
     output = embed.text(
         texts=[query],
         model="nomic-embed-text-v1.5",
@@ -136,7 +102,6 @@ def _get_query_embedding(query: str) -> list:
 
 
 async def _fetch_transcript(video_id: str) -> str:
-    """Fetch transcript via Supadata API."""
     url     = "https://api.supadata.ai/v1/youtube/transcript"
     headers = {"x-api-key": SUPADATA_API_KEY}
     params  = {"videoId": video_id, "text": "true"}
@@ -191,12 +156,10 @@ async def ingest(req: IngestRequest):
         count = col.count()
         return IngestResponse(video_id=video_id, status="already_exists", chunk_count=count)
 
-    # Fetch transcript
     logger.info("Fetching transcript for '%s' …", video_id)
     transcript = await _fetch_transcript(video_id)
     logger.info("Transcript: %d chars", len(transcript))
 
-    # Chunk
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
@@ -205,11 +168,9 @@ async def ingest(req: IngestRequest):
     chunks = splitter.split_text(transcript)
     logger.info("Split into %d chunks.", len(chunks))
 
-    # Get embeddings via Nomic
     logger.info("Generating embeddings via Nomic …")
     embeddings = _get_embeddings(chunks)
 
-    # Store in ChromaDB
     col = chroma_client.create_collection(name=_collection_name(video_id))
     col.add(
         documents=chunks,
@@ -231,15 +192,11 @@ async def chat(req: ChatRequest):
     if not _collection_exists(video_id):
         raise HTTPException(status_code=404, detail=f"Video '{video_id}' not indexed.")
 
-    # Get query embedding
     query_embedding = _get_query_embedding(question)
-
-    # Search ChromaDB
     col     = chroma_client.get_collection(_collection_name(video_id))
     results = col.query(query_embeddings=[query_embedding], n_results=TOP_K)
     context = "\n\n".join(results["documents"][0])
 
-    # Generate answer
     prompt   = RAG_PROMPT.format_messages(context=context, question=question)
     response = await llm.ainvoke(prompt)
 
