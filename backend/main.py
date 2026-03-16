@@ -1,10 +1,7 @@
 """
 YouTube AI Assistant — FastAPI Backend
-RAG pipeline: LangChain + ChromaDB + Groq
-
-Transcript fetched via Supadata API (avoids YouTube IP blocks on cloud)
-Embeddings via HuggingFace Inference API
-LLM via Groq API
+RAG: Nomic Embeddings + ChromaDB + Supadata + Groq
+100% Free Stack
 """
 
 import os
@@ -18,51 +15,55 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
+import chromadb
+from nomic import embed
+import nomic
+
 from langchain_groq import ChatGroq
-from langchain_chroma import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
 
-GROQ_API_KEY      = os.getenv("GROQ_API_KEY", "")
-HF_TOKEN          = os.getenv("HUGGINGFACEHUB_API_TOKEN", "")
-SUPADATA_API_KEY  = os.getenv("SUPADATA_API_KEY", "")
-CHROMA_PERSIST    = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
-EMBED_MODEL       = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-LLM_MODEL         = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
-CHUNK_SIZE        = int(os.getenv("CHUNK_SIZE", "1000"))
-CHUNK_OVERLAP     = int(os.getenv("CHUNK_OVERLAP", "200"))
-TOP_K             = int(os.getenv("TOP_K", "4"))
+GROQ_API_KEY     = os.getenv("GROQ_API_KEY", "")
+NOMIC_API_KEY    = os.getenv("NOMIC_API_KEY", "")
+SUPADATA_API_KEY = os.getenv("SUPADATA_API_KEY", "")
+CHROMA_PERSIST   = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
+LLM_MODEL        = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
+CHUNK_SIZE       = int(os.getenv("CHUNK_SIZE", "1000"))
+CHUNK_OVERLAP    = int(os.getenv("CHUNK_OVERLAP", "200"))
+TOP_K            = int(os.getenv("TOP_K", "4"))
 
-embeddings = None
-llm        = None
+chroma_client = None
+llm           = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global embeddings, llm
+    global chroma_client, llm
 
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY is not set.")
-    if not HF_TOKEN:
-        raise RuntimeError("HUGGINGFACEHUB_API_TOKEN is not set.")
+    if not NOMIC_API_KEY:
+        raise RuntimeError("NOMIC_API_KEY is not set.")
     if not SUPADATA_API_KEY:
         raise RuntimeError("SUPADATA_API_KEY is not set.")
 
-    logger.info("Loading embeddings via HF Inference API …")
-    embeddings = HuggingFaceInferenceAPIEmbeddings(
-        api_key=HF_TOKEN,
-        model_name=EMBED_MODEL,
-    )
-    logger.info("Embeddings ready ✅")
+    # Nomic login
+    logger.info("Logging into Nomic …")
+    nomic.login(NOMIC_API_KEY)
+    logger.info("Nomic ready ✅")
 
+    # ChromaDB
+    logger.info("Setting up ChromaDB …")
+    chroma_client = chromadb.PersistentClient(path=CHROMA_PERSIST)
+    logger.info("ChromaDB ready ✅")
+
+    # Groq LLM
     logger.info("Connecting to Groq — model '%s' …", LLM_MODEL)
     llm = ChatGroq(
         api_key=GROQ_API_KEY,
@@ -76,7 +77,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down …")
 
 
-app = FastAPI(title="YouTube AI Assistant", version="3.0.0", lifespan=lifespan)
+app = FastAPI(title="YouTube AI Assistant", version="4.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -87,7 +88,6 @@ app.add_middleware(
 )
 
 
-# ── Schemas ───────────────────────────────────────────────────────────────────
 class IngestRequest(BaseModel):
     video_id: str
 
@@ -99,7 +99,6 @@ class IngestResponse(BaseModel):
 class ChatRequest(BaseModel):
     video_id: str
     question: str
-    stream: bool = False
 
 class ChatResponse(BaseModel):
     video_id: str
@@ -107,29 +106,38 @@ class ChatResponse(BaseModel):
     answer: str
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 def _collection_name(video_id: str) -> str:
     return f"yt_{video_id}"
 
 
 def _collection_exists(video_id: str) -> bool:
-    import chromadb
-    client   = chromadb.PersistentClient(path=CHROMA_PERSIST)
-    existing = [c.name for c in client.list_collections()]
+    existing = [c.name for c in chroma_client.list_collections()]
     return _collection_name(video_id) in existing
 
 
-def _get_vectorstore(video_id: str) -> Chroma:
-    return Chroma(
-        collection_name=_collection_name(video_id),
-        embedding_function=embeddings,
-        persist_directory=CHROMA_PERSIST,
+def _get_embeddings(texts: list) -> list:
+    """Get embeddings using Nomic API."""
+    output = embed.text(
+        texts=texts,
+        model="nomic-embed-text-v1.5",
+        task_type="search_document",
     )
+    return output["embeddings"]
 
 
-async def _fetch_transcript_supadata(video_id: str) -> str:
-    """Fetch transcript using Supadata API — works from cloud servers."""
-    url = f"https://api.supadata.ai/v1/youtube/transcript"
+def _get_query_embedding(query: str) -> list:
+    """Get query embedding using Nomic API."""
+    output = embed.text(
+        texts=[query],
+        model="nomic-embed-text-v1.5",
+        task_type="search_query",
+    )
+    return output["embeddings"][0]
+
+
+async def _fetch_transcript(video_id: str) -> str:
+    """Fetch transcript via Supadata API."""
+    url     = "https://api.supadata.ai/v1/youtube/transcript"
     headers = {"x-api-key": SUPADATA_API_KEY}
     params  = {"videoId": video_id, "text": "true"}
 
@@ -137,25 +145,17 @@ async def _fetch_transcript_supadata(video_id: str) -> str:
         response = await client.get(url, headers=headers, params=params)
 
     if response.status_code == 404:
-        raise HTTPException(
-            status_code=422,
-            detail=f"No transcript found for video '{video_id}'. Try another video."
-        )
+        raise HTTPException(status_code=422, detail=f"No transcript for '{video_id}'.")
     if response.status_code != 200:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Supadata API error: {response.status_code} — {response.text}"
-        )
+        raise HTTPException(status_code=500, detail=f"Supadata error: {response.text}")
 
     data = response.json()
-
-    # Supadata returns transcript as string or list
     if isinstance(data.get("content"), str):
         return data["content"]
     elif isinstance(data.get("content"), list):
         return " ".join(item.get("text", "") for item in data["content"])
     else:
-        raise HTTPException(status_code=500, detail="Unexpected transcript format from Supadata.")
+        raise HTTPException(status_code=500, detail="Unexpected transcript format.")
 
 
 RAG_PROMPT = ChatPromptTemplate.from_template(
@@ -174,21 +174,6 @@ Answer:"""
 )
 
 
-def _build_rag_chain(video_id: str):
-    retriever = _get_vectorstore(video_id).as_retriever(search_kwargs={"k": TOP_K})
-
-    def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
-
-    return (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
-        | RAG_PROMPT
-        | llm
-        | StrOutputParser()
-    )
-
-
-# ── Endpoints ─────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
     return {"status": "ok", "llm": LLM_MODEL}
@@ -196,20 +181,19 @@ async def health():
 
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest(req: IngestRequest):
-    """Fetch transcript via Supadata API and index into ChromaDB."""
     video_id = req.video_id.strip()
     if not video_id:
-        raise HTTPException(status_code=400, detail="video_id is required.")
+        raise HTTPException(status_code=400, detail="video_id required.")
 
-    # Already indexed?
     if _collection_exists(video_id):
         logger.info("'%s' already indexed.", video_id)
-        count = _get_vectorstore(video_id)._collection.count()
+        col   = chroma_client.get_collection(_collection_name(video_id))
+        count = col.count()
         return IngestResponse(video_id=video_id, status="already_exists", chunk_count=count)
 
-    # Fetch transcript via Supadata
-    logger.info("Fetching transcript for '%s' via Supadata …", video_id)
-    transcript = await _fetch_transcript_supadata(video_id)
+    # Fetch transcript
+    logger.info("Fetching transcript for '%s' …", video_id)
+    transcript = await _fetch_transcript(video_id)
     logger.info("Transcript: %d chars", len(transcript))
 
     # Chunk
@@ -218,26 +202,27 @@ async def ingest(req: IngestRequest):
         chunk_overlap=CHUNK_OVERLAP,
         separators=["\n\n", "\n", ". ", " ", ""],
     )
-    chunks = splitter.create_documents(
-        texts=[transcript],
-        metadatas=[{"video_id": video_id}],
-    )
+    chunks = splitter.split_text(transcript)
+    logger.info("Split into %d chunks.", len(chunks))
 
-    # Embed and persist
-    Chroma.from_documents(
+    # Get embeddings via Nomic
+    logger.info("Generating embeddings via Nomic …")
+    embeddings = _get_embeddings(chunks)
+
+    # Store in ChromaDB
+    col = chroma_client.create_collection(name=_collection_name(video_id))
+    col.add(
         documents=chunks,
-        embedding=embeddings,
-        collection_name=_collection_name(video_id),
-        persist_directory=CHROMA_PERSIST,
+        embeddings=embeddings,
+        ids=[f"{video_id}_{i}" for i in range(len(chunks))]
     )
-    logger.info("Done — %d chunks ✅", len(chunks))
+    logger.info("Indexed %d chunks ✅", len(chunks))
 
     return IngestResponse(video_id=video_id, status="ingested", chunk_count=len(chunks))
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
-    """Answer a question about an already-indexed YouTube video."""
     video_id = req.video_id.strip()
     question = req.question.strip()
 
@@ -246,18 +231,16 @@ async def chat(req: ChatRequest):
     if not _collection_exists(video_id):
         raise HTTPException(status_code=404, detail=f"Video '{video_id}' not indexed.")
 
-    chain = _build_rag_chain(video_id)
+    # Get query embedding
+    query_embedding = _get_query_embedding(question)
 
-    if req.stream:
-        async def token_stream():
-            async for token in chain.astream(question):
-                yield token
-        return StreamingResponse(token_stream(), media_type="text/plain")
+    # Search ChromaDB
+    col     = chroma_client.get_collection(_collection_name(video_id))
+    results = col.query(query_embeddings=[query_embedding], n_results=TOP_K)
+    context = "\n\n".join(results["documents"][0])
 
-    try:
-        answer = await chain.ainvoke(question)
-    except Exception as exc:
-        logger.exception("RAG chain error")
-        raise HTTPException(status_code=500, detail=str(exc))
+    # Generate answer
+    prompt   = RAG_PROMPT.format_messages(context=context, question=question)
+    response = await llm.ainvoke(prompt)
 
-    return ChatResponse(video_id=video_id, question=question, answer=answer)
+    return ChatResponse(video_id=video_id, question=question, answer=response.content)
