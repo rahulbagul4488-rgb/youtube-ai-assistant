@@ -2,12 +2,14 @@
 YouTube AI Assistant — FastAPI Backend
 RAG pipeline: LangChain + ChromaDB + Groq
 
-Transcript is fetched by the Chrome Extension (user's browser)
-and sent to this server — avoids YouTube IP blocks on cloud servers.
+Transcript fetched via Supadata API (avoids YouTube IP blocks on cloud)
+Embeddings via HuggingFace Inference API
+LLM via Groq API
 """
 
 import os
 import logging
+import httpx
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
@@ -29,14 +31,15 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
 
-GROQ_API_KEY   = os.getenv("GROQ_API_KEY", "")
-HF_TOKEN       = os.getenv("HUGGINGFACEHUB_API_TOKEN", "")
-CHROMA_PERSIST = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
-EMBED_MODEL    = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-LLM_MODEL      = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
-CHUNK_SIZE     = int(os.getenv("CHUNK_SIZE", "1000"))
-CHUNK_OVERLAP  = int(os.getenv("CHUNK_OVERLAP", "200"))
-TOP_K          = int(os.getenv("TOP_K", "4"))
+GROQ_API_KEY      = os.getenv("GROQ_API_KEY", "")
+HF_TOKEN          = os.getenv("HUGGINGFACEHUB_API_TOKEN", "")
+SUPADATA_API_KEY  = os.getenv("SUPADATA_API_KEY", "")
+CHROMA_PERSIST    = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
+EMBED_MODEL       = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+LLM_MODEL         = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
+CHUNK_SIZE        = int(os.getenv("CHUNK_SIZE", "1000"))
+CHUNK_OVERLAP     = int(os.getenv("CHUNK_OVERLAP", "200"))
+TOP_K             = int(os.getenv("TOP_K", "4"))
 
 embeddings = None
 llm        = None
@@ -50,6 +53,8 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("GROQ_API_KEY is not set.")
     if not HF_TOKEN:
         raise RuntimeError("HUGGINGFACEHUB_API_TOKEN is not set.")
+    if not SUPADATA_API_KEY:
+        raise RuntimeError("SUPADATA_API_KEY is not set.")
 
     logger.info("Loading embeddings via HF Inference API …")
     embeddings = HuggingFaceInferenceAPIEmbeddings(
@@ -71,7 +76,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down …")
 
 
-app = FastAPI(title="YouTube AI Assistant", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="YouTube AI Assistant", version="3.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -82,9 +87,9 @@ app.add_middleware(
 )
 
 
+# ── Schemas ───────────────────────────────────────────────────────────────────
 class IngestRequest(BaseModel):
     video_id: str
-    transcript: str
 
 class IngestResponse(BaseModel):
     video_id: str
@@ -102,6 +107,7 @@ class ChatResponse(BaseModel):
     answer: str
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def _collection_name(video_id: str) -> str:
     return f"yt_{video_id}"
 
@@ -119,6 +125,37 @@ def _get_vectorstore(video_id: str) -> Chroma:
         embedding_function=embeddings,
         persist_directory=CHROMA_PERSIST,
     )
+
+
+async def _fetch_transcript_supadata(video_id: str) -> str:
+    """Fetch transcript using Supadata API — works from cloud servers."""
+    url = f"https://api.supadata.ai/v1/youtube/transcript"
+    headers = {"x-api-key": SUPADATA_API_KEY}
+    params  = {"videoId": video_id, "text": "true"}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(url, headers=headers, params=params)
+
+    if response.status_code == 404:
+        raise HTTPException(
+            status_code=422,
+            detail=f"No transcript found for video '{video_id}'. Try another video."
+        )
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Supadata API error: {response.status_code} — {response.text}"
+        )
+
+    data = response.json()
+
+    # Supadata returns transcript as string or list
+    if isinstance(data.get("content"), str):
+        return data["content"]
+    elif isinstance(data.get("content"), list):
+        return " ".join(item.get("text", "") for item in data["content"])
+    else:
+        raise HTTPException(status_code=500, detail="Unexpected transcript format from Supadata.")
 
 
 RAG_PROMPT = ChatPromptTemplate.from_template(
@@ -151,6 +188,7 @@ def _build_rag_chain(video_id: str):
     )
 
 
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
     return {"status": "ok", "llm": LLM_MODEL}
@@ -158,21 +196,23 @@ async def health():
 
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest(req: IngestRequest):
-    video_id   = req.video_id.strip()
-    transcript = req.transcript.strip()
-
+    """Fetch transcript via Supadata API and index into ChromaDB."""
+    video_id = req.video_id.strip()
     if not video_id:
         raise HTTPException(status_code=400, detail="video_id is required.")
-    if not transcript:
-        raise HTTPException(status_code=400, detail="transcript is required.")
 
+    # Already indexed?
     if _collection_exists(video_id):
         logger.info("'%s' already indexed.", video_id)
         count = _get_vectorstore(video_id)._collection.count()
         return IngestResponse(video_id=video_id, status="already_exists", chunk_count=count)
 
-    logger.info("Indexing '%s' — %d chars", video_id, len(transcript))
+    # Fetch transcript via Supadata
+    logger.info("Fetching transcript for '%s' via Supadata …", video_id)
+    transcript = await _fetch_transcript_supadata(video_id)
+    logger.info("Transcript: %d chars", len(transcript))
 
+    # Chunk
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
@@ -183,6 +223,7 @@ async def ingest(req: IngestRequest):
         metadatas=[{"video_id": video_id}],
     )
 
+    # Embed and persist
     Chroma.from_documents(
         documents=chunks,
         embedding=embeddings,
@@ -196,6 +237,7 @@ async def ingest(req: IngestRequest):
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
+    """Answer a question about an already-indexed YouTube video."""
     video_id = req.video_id.strip()
     question = req.question.strip()
 
