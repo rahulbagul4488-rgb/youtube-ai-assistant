@@ -17,7 +17,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 # LangChain
-from langchain_huggingface import HuggingFaceEmbeddings
+#from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
 from langchain_groq import ChatGroq
 from langchain_chroma import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -67,10 +68,9 @@ async def lifespan(app: FastAPI):
 
     # Embeddings — runs locally
     logger.info("Loading embedding model '%s' …", EMBED_MODEL)
-    embeddings = HuggingFaceEmbeddings(
-        model_name=EMBED_MODEL,
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True},
+    embeddings = HuggingFaceInferenceAPIEmbeddings(
+    api_key=os.getenv("HUGGINGFACEHUB_API_TOKEN"),
+    model_name=EMBED_MODEL,
     )
     logger.info("Embeddings ready ✅")
 
