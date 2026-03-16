@@ -1,6 +1,6 @@
 "use strict";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = "https://youtube-ai-assistant-ikot.onrender.com";
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const statusDot     = document.getElementById("status-dot");
