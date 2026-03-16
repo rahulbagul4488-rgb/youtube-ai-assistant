@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "YouTube AI Assistant (HF)",
-  "version": "1.0.0",
-  "description": "Chat with any YouTube video using open-source AI.",
+  "version": "2.0.0",
+  "description": "Chat with any YouTube video using open-source AI (HuggingFace + RAG).",
 
   "permissions": [
     "activeTab",
@@ -13,7 +13,7 @@
 
   "host_permissions": [
     "https://www.youtube.com/*",
-    "http://localhost:8000/*"
+    "https://youtube-ai-assistant-ikot.onrender.com/*"
   ],
 
   "action": {
