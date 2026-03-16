@@ -1,6 +1,5 @@
 "use strict";
 
-// ⚠️ UPDATE THIS to your Render URL
 const API_BASE = "https://youtube-ai-assistant-ikot.onrender.com";
 
 const statusDot     = document.getElementById("status-dot");
@@ -21,7 +20,6 @@ function setStatus(text, color) {
 function addMessage(text, role) {
   const placeholder = chatMessages.querySelector(".msg.system");
   if (placeholder) placeholder.remove();
-
   const div = document.createElement("div");
   div.className   = "msg " + (role || "assistant");
   div.textContent = text;
@@ -67,33 +65,25 @@ async function checkBackend() {
   }
 }
 
-// ── Fetch transcript from YouTube page directly (user's browser) ──────────────
 async function fetchTranscriptFromPage(videoId) {
   return new Promise((resolve, reject) => {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return reject(new Error("No active tab"));
-
       chrome.scripting.executeScript(
         {
           target: { tabId: tabs[0].id },
           func: async (vid) => {
             try {
-              // Fetch YouTube's timedtext API
               const pageRes  = await fetch(`https://www.youtube.com/watch?v=${vid}`);
               const pageHtml = await pageRes.text();
-
-              // Extract captions URL from page source
               const match = pageHtml.match(/"captionTracks":\[.*?"baseUrl":"(.*?)"/);
               if (!match) return { error: "No captions found for this video." };
-
               const captionUrl = match[1].replace(/\\u0026/g, "&");
               const xmlRes     = await fetch(captionUrl);
               const xmlText    = await xmlRes.text();
-
-              // Parse XML transcript
-              const parser  = new DOMParser();
-              const xmlDoc  = parser.parseFromString(xmlText, "text/xml");
-              const texts   = xmlDoc.getElementsByTagName("text");
+              const parser     = new DOMParser();
+              const xmlDoc     = parser.parseFromString(xmlText, "text/xml");
+              const texts      = xmlDoc.getElementsByTagName("text");
               const transcript = Array.from(texts)
                 .map(t => t.textContent
                   .replace(/&amp;/g, "&")
@@ -105,7 +95,6 @@ async function fetchTranscriptFromPage(videoId) {
                 )
                 .filter(Boolean)
                 .join(" ");
-
               return { transcript };
             } catch (e) {
               return { error: e.message };
@@ -114,13 +103,11 @@ async function fetchTranscriptFromPage(videoId) {
           args: [videoId],
         },
         (results) => {
-          if (chrome.runtime.lastError) {
-            return reject(new Error(chrome.runtime.lastError.message));
-          }
+          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
           const result = results?.[0]?.result;
-          if (!result)        return reject(new Error("Script execution failed."));
-          if (result.error)   return reject(new Error(result.error));
-          if (!result.transcript) return reject(new Error("Empty transcript."));
+          if (!result)             return reject(new Error("Script execution failed."));
+          if (result.error)        return reject(new Error(result.error));
+          if (!result.transcript)  return reject(new Error("Empty transcript."));
           resolve(result.transcript);
         }
       );
@@ -128,28 +115,20 @@ async function fetchTranscriptFromPage(videoId) {
   });
 }
 
-// ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
   setStatus("Connecting to backend…", "yellow");
-
   const backendOk = await checkBackend();
   if (!backendOk) {
     setStatus("Backend offline!", "red");
     return;
   }
-
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (!tabs[0]) {
-      setStatus("No active tab.", "red");
-      return;
-    }
-
+    if (!tabs[0]) { setStatus("No active tab.", "red"); return; }
     chrome.tabs.sendMessage(tabs[0].id, { action: "getVideoId" }, (response) => {
       if (chrome.runtime.lastError || !response || !response.videoId) {
         setStatus("Open a YouTube video first.", "red");
         return;
       }
-
       currentVideoId = response.videoId;
       setStatus("Video detected: " + currentVideoId, "green");
       btnIngest.disabled    = false;
@@ -158,10 +137,8 @@ async function init() {
   });
 }
 
-// ── Ingest ────────────────────────────────────────────────────────────────────
 btnIngest.addEventListener("click", async () => {
   if (!currentVideoId) return;
-
   setBusy(true);
   setStatus("Fetching transcript…", "yellow");
   btnIngest.textContent = "⏳ Fetching transcript…";
@@ -188,9 +165,7 @@ btnIngest.addEventListener("click", async () => {
       body:    JSON.stringify({ video_id: currentVideoId, transcript }),
     });
     const data = await res.json();
-
     if (!res.ok) throw new Error(data.detail || "HTTP " + res.status);
-
     videoIndexed = true;
     const label  = data.status === "already_exists" ? "Already indexed" : "Indexed";
     setStatus(label + " — " + data.chunk_count + " chunks", "green");
@@ -202,7 +177,6 @@ btnIngest.addEventListener("click", async () => {
       "assistant"
     );
     enableChat();
-
   } catch (err) {
     setStatus("Indexing failed!", "red");
     btnIngest.textContent = "⚡ Retry";
@@ -212,17 +186,14 @@ btnIngest.addEventListener("click", async () => {
   }
 });
 
-// ── Chat ──────────────────────────────────────────────────────────────────────
 async function sendQuestion() {
   const question = questionInput.value.trim();
   if (!question || !videoIndexed) return;
-
   addMessage(question, "user");
   questionInput.value        = "";
   questionInput.style.height = "40px";
   setBusy(true);
   showTyping();
-
   try {
     const res  = await fetch(API_BASE + "/chat", {
       method:  "POST",
@@ -230,11 +201,9 @@ async function sendQuestion() {
       body:    JSON.stringify({ video_id: currentVideoId, question }),
     });
     const data = await res.json();
-
     removeTyping();
     if (!res.ok) throw new Error(data.detail || "HTTP " + res.status);
     addMessage(data.answer, "assistant");
-
   } catch (err) {
     removeTyping();
     addMessage("❌ " + err.message, "system");
