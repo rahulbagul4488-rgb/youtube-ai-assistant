@@ -33,7 +33,7 @@ CHROMA_PERSIST   = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
 LLM_MODEL        = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
 CHUNK_SIZE       = int(os.getenv("CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP    = int(os.getenv("CHUNK_OVERLAP", "200"))
-TOP_K            = int(os.getenv("TOP_K", "4"))
+TOP_K            = int(os.getenv("TOP_K", "6"))
 
 # Initialize at module level — fast startup
 nomic.login(NOMIC_API_KEY)
